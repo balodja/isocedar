@@ -11,10 +11,13 @@ crate-type = ["cdylib"]
 [profile.dev]
 opt-level = 3
 
+[features]
+default = ["pyo3/abi3-py39"]
+
 [dependencies]
 enum_dispatch = "0.3"
 itertools = "0.12"
-pyo3 = { version = "0.21", features = ["abi3-py39", "extension-module"] }
+pyo3 = { version = "0.21", features = ["extension-module"] }
 # Needs to be consistent with ndarray dependecy in numpy
 ndarray = { version = "0.15", features = ["rayon"] }
 num-traits = "0.2"
