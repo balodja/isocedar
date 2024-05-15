@@ -1,22 +1,14 @@
 import joblib
 import numpy as np
 
-from .calc_paths_sum import calc_feature_delta_sum, calc_paths_sum  # noqa
+from .calc_paths_sum import calc_paths_sum, selector_dtype  # noqa
 from .utils import average_path_length
 
 __all__ = ["ForestEvaluator"]
 
 
 class ForestEvaluator:
-    selector_dtype = np.dtype(
-        [
-            ("feature", np.int32),
-            ("left", np.int32),
-            ("value", np.double),
-            ("right", np.int32),
-            ("log_n_node_samples", np.float32),
-        ]
-    )
+    selector_dtype = selector_dtype
 
     def __init__(self, samples, selectors, indices, leaf_count, *, num_threads):
         """
