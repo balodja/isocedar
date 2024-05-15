@@ -1,6 +1,6 @@
 use enum_dispatch::enum_dispatch;
 use itertools::Itertools;
-use ndarray::{Array1, ArrayView1, ArrayView2, Axis, Zip};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis, Zip};
 use num_traits::AsPrimitive;
 use numpy::PyArrayMethods;
 use numpy::{Element, PyArray, PyArrayDescr};
@@ -97,6 +97,14 @@ trait DataTrait<'py> {
         weights: Option<Bound<'py, PyArray1<f64>>>,
         num_threads: usize,
     ) -> PyResult<Bound<'py, PyArray1<f64>>>;
+
+    fn calc_feature_delta_sum(
+        &self,
+        py: Python<'py>,
+        selectors: Bound<'py, PyArray1<Selector>>,
+        indices: Bound<'py, PyArray1<i64>>,
+        num_threads: usize,
+    ) -> PyResult<(Bound<'py, PyArray2<f64>>, Bound<'py, PyArray2<i64>>)>;
 }
 
 impl<'py, T> DataTrait<'py> for Bound<'py, PyArray2<T>>
@@ -149,15 +157,15 @@ where
     ) -> PyResult<Bound<'py, PyArray1<f64>>> {
         let selectors = selectors.readonly();
         let selectors_view = selectors.as_array();
-        crate::check_selectors(selectors_view)?;
+        check_selectors(selectors_view)?;
 
         let indices = indices.readonly();
         let indices_view = indices.as_array();
-        crate::check_indices(indices_view, selectors.len()?)?;
+        check_indices(indices_view, selectors.len()?)?;
 
         let data = self.readonly();
         let data_view = data.as_array();
-        crate::check_data(data_view)?;
+        check_data(data_view)?;
 
         let weights = weights.map(|weights| weights.readonly());
         let weights_view = weights.as_ref().map(|weights| weights.as_array());
@@ -172,6 +180,34 @@ where
             num_threads,
         );
         Ok(PyArray::from_owned_array_bound(py, values))
+    }
+
+    fn calc_feature_delta_sum(
+        &self,
+        py: Python<'py>,
+        selectors: Bound<'py, PyArray1<Selector>>,
+        indices: Bound<'py, PyArray1<i64>>,
+        num_threads: usize,
+    ) -> PyResult<(Bound<'py, PyArray2<f64>>, Bound<'py, PyArray2<i64>>)> {
+        let selectors = selectors.readonly();
+        let selectors_view = selectors.as_array();
+        check_selectors(selectors_view)?;
+
+        let indices = indices.readonly();
+        let indices_view = indices.as_array();
+        check_indices(indices_view, selectors.len()?)?;
+
+        let data = self.readonly();
+        let data_view = data.as_array();
+        check_data(data_view)?;
+
+        let (delta_sum, hit_count) =
+            calc_feature_delta_sum_impl(selectors_view, indices_view, data_view, num_threads);
+
+        let delta_sum = PyArray::from_owned_array_bound(py, delta_sum);
+        let hit_count = PyArray::from_owned_array_bound(py, hit_count);
+
+        Ok((delta_sum, hit_count))
     }
 }
 
@@ -374,11 +410,88 @@ where
         .collect()
 }
 
+#[pyfunction]
+#[pyo3(signature = (selectors, indices, data, num_threads = 0))]
+pub(crate) fn calc_feature_delta_sum<'py>(
+    py: Python<'py>,
+    selectors: Bound<'py, PyArray1<Selector>>,
+    indices: Bound<'py, PyArray1<i64>>,
+    data: Data<'py>,
+    num_threads: usize,
+) -> PyResult<(Bound<'py, PyArray2<f64>>, Bound<'py, PyArray2<i64>>)> {
+    data.calc_feature_delta_sum(py, selectors, indices, num_threads)
+}
+
+fn calc_feature_delta_sum_impl<T>(
+    selectors: ArrayView1<Selector>,
+    indices: ArrayView1<i64>,
+    data: ArrayView2<T>,
+    num_threads: usize,
+) -> (Array2<f64>, Array2<i64>)
+where
+    T: Copy + Send + Sync + PartialOrd + 'static,
+    f64: AsPrimitive<T>,
+{
+    let indices = indices.as_slice().unwrap();
+    let selectors = selectors.as_slice().unwrap();
+
+    let mut delta_sum = Array2::zeros((data.nrows(), data.ncols()));
+    let mut hit_count = Array2::zeros((data.nrows(), data.ncols()));
+
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(num_threads)
+        .build()
+        .expect("Cannot build rayon ThreadPool")
+        .install(|| {
+            Zip::from(data.rows())
+                .and(delta_sum.rows_mut())
+                .and(hit_count.rows_mut())
+                .par_for_each(|sample, mut delta_sum_row, mut hit_count_row| {
+                    for (tree_start, tree_end) in
+                        indices.iter().map(|i| *i as usize).tuple_windows()
+                    {
+                        let tree_selectors =
+                            unsafe { selectors.get_unchecked(tree_start..tree_end) };
+
+                        let mut i = 0;
+                        let mut parent_selector: &Selector;
+                        loop {
+                            parent_selector = unsafe { tree_selectors.get_unchecked(i) };
+                            if parent_selector.is_leaf() {
+                                break;
+                            }
+
+                            // TODO: do opposite type casting: what if we trained on huge f64 and predict on f32?
+                            let threshold: T = parent_selector.value.as_();
+                            i = if *unsafe { sample.uget(parent_selector.feature as usize) }
+                                <= threshold
+                            {
+                                parent_selector.left as usize
+                            } else {
+                                parent_selector.right as usize
+                            };
+
+                            let child_selector = unsafe { tree_selectors.get_unchecked(i) };
+                            *unsafe { delta_sum_row.uget_mut(parent_selector.feature as usize) } +=
+                                1.0 + 2.0
+                                    * (child_selector.log_n_node_samples as f64
+                                        - parent_selector.log_n_node_samples as f64);
+                            *unsafe { hit_count_row.uget_mut(parent_selector.feature as usize) } +=
+                                1;
+                        }
+                    }
+                });
+        });
+
+    (delta_sum, hit_count)
+}
+
 #[pymodule]
 #[pyo3(name = "calc_paths_sum")]
 fn rust_module(_py: Python, m: &Bound<PyModule>) -> PyResult<()> {
     m.add("selector_dtype", Selector::dtype(_py)?)?;
     m.add_function(wrap_pyfunction!(calc_paths_sum, m)?)?;
     m.add_function(wrap_pyfunction!(calc_paths_sum_transpose, m)?)?;
+    m.add_function(wrap_pyfunction!(calc_feature_delta_sum, m)?)?;
     Ok(())
 }
