@@ -40,7 +40,13 @@ impl Selector {
             *locals,
             r#"
             dtype = __import__('numpy').dtype(
-                [('feature', 'i4'), ('left', 'i4'), ('value', 'f8'), ('right', 'i4')],
+                [
+                    ('feature', 'i4'),
+                    ('left', 'i4'),
+                    ('value', 'f8'),
+                    ('right', 'i4'),
+                    ('log_n_node_samples', 'f4')
+                ],
                 align=True,
             )
             "#
