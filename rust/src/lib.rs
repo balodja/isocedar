@@ -1,3 +1,5 @@
+mod mut_slices;
+
 use enum_dispatch::enum_dispatch;
 use itertools::Itertools;
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis, Zip};
@@ -10,8 +12,6 @@ use pyo3::prelude::*;
 use pyo3::py_run;
 use pyo3::types::PyDict;
 use rayon::prelude::*;
-use std::iter;
-use std::sync::{Arc, Mutex};
 
 /// Selector is the representation of decision tree nodes: either branches or leafs.
 ///
@@ -83,7 +83,7 @@ trait DataTrait<'py> {
         &self,
         py: Python<'py>,
         selectors: Bound<'py, PyArray1<Selector>>,
-        indices: Bound<'py, PyArray1<i64>>,
+        node_offsets: Bound<'py, PyArray1<usize>>,
         weights: Option<Bound<'py, PyArray1<f64>>>,
         num_threads: usize,
     ) -> PyResult<Bound<'py, PyArray1<f64>>>;
@@ -92,8 +92,8 @@ trait DataTrait<'py> {
         &self,
         py: Python<'py>,
         selectors: Bound<'py, PyArray1<Selector>>,
-        indices: Bound<'py, PyArray1<i64>>,
-        leaf_count: usize,
+        node_offsets: Bound<'py, PyArray1<usize>>,
+        leaf_offsets: Bound<'py, PyArray1<usize>>,
         weights: Option<Bound<'py, PyArray1<f64>>>,
         num_threads: usize,
     ) -> PyResult<Bound<'py, PyArray1<f64>>>;
@@ -102,7 +102,7 @@ trait DataTrait<'py> {
         &self,
         py: Python<'py>,
         selectors: Bound<'py, PyArray1<Selector>>,
-        indices: Bound<'py, PyArray1<i64>>,
+        node_offsets: Bound<'py, PyArray1<usize>>,
         num_threads: usize,
     ) -> PyResult<(Bound<'py, PyArray2<f64>>, Bound<'py, PyArray2<i64>>)>;
 }
@@ -116,7 +116,7 @@ where
         &self,
         py: Python<'py>,
         selectors: Bound<'py, PyArray1<Selector>>,
-        indices: Bound<'py, PyArray1<i64>>,
+        node_offsets: Bound<'py, PyArray1<usize>>,
         weights: Option<Bound<'py, PyArray1<f64>>>,
         num_threads: usize,
     ) -> PyResult<Bound<'py, PyArray1<f64>>> {
@@ -124,9 +124,9 @@ where
         let selectors_view = selectors.as_array();
         check_selectors(selectors_view)?;
 
-        let indices = indices.readonly();
-        let indices_view = indices.as_array();
-        check_indices(indices_view, selectors.len()?)?;
+        let node_offsets = node_offsets.readonly();
+        let node_offsets_view = node_offsets.as_array();
+        check_node_offsets(node_offsets_view, selectors.len()?)?;
 
         let data = self.readonly();
         let data_view = data.as_array();
@@ -138,7 +138,7 @@ where
         // Here we need to dispatch `data` and run the template function
         let values = calc_paths_sum_impl(
             selectors_view,
-            indices_view,
+            node_offsets_view,
             data_view,
             weights_view,
             num_threads,
@@ -150,8 +150,8 @@ where
         &self,
         py: Python<'py>,
         selectors: Bound<'py, PyArray1<Selector>>,
-        indices: Bound<'py, PyArray1<i64>>,
-        leaf_count: usize,
+        node_offsets: Bound<'py, PyArray1<usize>>,
+        leaf_offsets: Bound<'py, PyArray1<usize>>,
         weights: Option<Bound<'py, PyArray1<f64>>>,
         num_threads: usize,
     ) -> PyResult<Bound<'py, PyArray1<f64>>> {
@@ -159,9 +159,13 @@ where
         let selectors_view = selectors.as_array();
         check_selectors(selectors_view)?;
 
-        let indices = indices.readonly();
-        let indices_view = indices.as_array();
-        check_indices(indices_view, selectors.len()?)?;
+        let node_offsets = node_offsets.readonly();
+        let node_offsets_view = node_offsets.as_array();
+        check_node_offsets(node_offsets_view, selectors_view.len())?;
+
+        let leaf_offsets = leaf_offsets.readonly();
+        let leaf_offsets_view = leaf_offsets.as_array();
+        check_leaf_offsets(leaf_offsets_view, node_offsets_view.len())?;
 
         let data = self.readonly();
         let data_view = data.as_array();
@@ -171,10 +175,10 @@ where
         let weights_view = weights.as_ref().map(|weights| weights.as_array());
 
         // Here we need to dispatch `data` and run the template function
-        let values = crate::calc_paths_sum_transpose_impl(
+        let values = calc_paths_sum_transpose_impl(
             selectors_view,
-            indices_view,
-            leaf_count,
+            node_offsets_view,
+            leaf_offsets_view,
             data_view,
             weights_view,
             num_threads,
@@ -186,23 +190,23 @@ where
         &self,
         py: Python<'py>,
         selectors: Bound<'py, PyArray1<Selector>>,
-        indices: Bound<'py, PyArray1<i64>>,
+        node_offsets: Bound<'py, PyArray1<usize>>,
         num_threads: usize,
     ) -> PyResult<(Bound<'py, PyArray2<f64>>, Bound<'py, PyArray2<i64>>)> {
         let selectors = selectors.readonly();
         let selectors_view = selectors.as_array();
         check_selectors(selectors_view)?;
 
-        let indices = indices.readonly();
-        let indices_view = indices.as_array();
-        check_indices(indices_view, selectors.len()?)?;
+        let node_offsets = node_offsets.readonly();
+        let node_offsets_view = node_offsets.as_array();
+        check_node_offsets(node_offsets_view, selectors.len()?)?;
 
         let data = self.readonly();
         let data_view = data.as_array();
         check_data(data_view)?;
 
         let (delta_sum, hit_count) =
-            calc_feature_delta_sum_impl(selectors_view, indices_view, data_view, num_threads);
+            calc_feature_delta_sum_impl(selectors_view, node_offsets_view, data_view, num_threads);
 
         let delta_sum = PyArray::from_owned_array_bound(py, delta_sum);
         let hit_count = PyArray::from_owned_array_bound(py, hit_count);
@@ -253,24 +257,47 @@ fn check_selectors(selectors: ArrayView1<Selector>) -> PyResult<()> {
 }
 
 #[inline]
-fn check_indices(indices: ArrayView1<i64>, selectors_length: usize) -> PyResult<()> {
-    if let Some(indices) = indices.as_slice() {
-        for (x, y) in indices.iter().copied().tuple_windows() {
+fn check_node_offsets(node_offsets: ArrayView1<usize>, selectors_length: usize) -> PyResult<()> {
+    if let Some(node_offsets) = node_offsets.as_slice() {
+        for (x, y) in node_offsets.iter().copied().tuple_windows() {
             if x > y {
                 return Err(PyValueError::new_err(
-                    "indices must be sorted in ascending order",
+                    "node_offsets must be sorted in ascending order",
                 ));
             }
         }
-        if indices[indices.len() - 1] as usize > selectors_length {
+        if node_offsets[node_offsets.len() - 1] as usize > selectors_length {
             return Err(PyValueError::new_err(
-                "indices are out of range of the selectors",
+                "node_offsets are out of range of the selectors",
             ));
         }
         Ok(())
     } else {
         Err(PyValueError::new_err(
-            "indices must be contiguous and in memory order",
+            "node_offsets must be contiguous and in memory order",
+        ))
+    }
+}
+
+#[inline]
+fn check_leaf_offsets(leaf_offsets: ArrayView1<usize>, node_offset_len: usize) -> PyResult<()> {
+    if leaf_offsets.len() != node_offset_len {
+        return Err(PyValueError::new_err(
+            "leaf_offsets must have the same length as node_offsets",
+        ));
+    }
+    if let Some(leaf_offsets) = leaf_offsets.as_slice() {
+        for (x, y) in leaf_offsets.iter().copied().tuple_windows() {
+            if x > y {
+                return Err(PyValueError::new_err(
+                    "leaf_offsets must be sorted in ascending order",
+                ));
+            }
+        }
+        Ok(())
+    } else {
+        Err(PyValueError::new_err(
+            "leaf_offsets must be contiguous and in memory order",
         ))
     }
 }
@@ -286,22 +313,22 @@ fn check_data<T>(data: ArrayView2<T>) -> PyResult<()> {
 }
 
 #[pyfunction]
-#[pyo3(signature = (selectors, indices, data, weights = None, num_threads = 0))]
+#[pyo3(signature = (selectors, node_offsets, data, weights = None, num_threads = 0))]
 pub(crate) fn calc_paths_sum<'py>(
     py: Python<'py>,
     selectors: Bound<'py, PyArray1<Selector>>,
-    indices: Bound<'py, PyArray1<i64>>,
+    node_offsets: Bound<'py, PyArray1<usize>>,
     // TODO: support f32 data
     data: Data<'py>,
     weights: Option<Bound<'py, PyArray1<f64>>>,
     num_threads: usize,
 ) -> PyResult<Bound<'py, PyArray1<f64>>> {
-    data.calc_paths_sum(py, selectors, indices, weights, num_threads)
+    data.calc_paths_sum(py, selectors, node_offsets, weights, num_threads)
 }
 
 fn calc_paths_sum_impl<T>(
     selectors: ArrayView1<Selector>,
-    indices: ArrayView1<i64>,
+    node_offsets: ArrayView1<usize>,
     data: ArrayView2<T>,
     weights: Option<ArrayView1<f64>>,
     num_threads: usize,
@@ -312,7 +339,7 @@ where
 {
     let mut paths = Array1::zeros(data.nrows());
 
-    let indices = indices.as_slice().unwrap();
+    let node_offsets = node_offsets.as_slice().unwrap();
     let selectors = selectors.as_slice().unwrap();
 
     rayon::ThreadPoolBuilder::new()
@@ -324,7 +351,7 @@ where
                 .and(data.rows())
                 .par_for_each(|path, sample| {
                     for (tree_start, tree_end) in
-                        indices.iter().map(|i| *i as usize).tuple_windows()
+                        node_offsets.iter().map(|i| *i as usize).tuple_windows()
                     {
                         let tree_selectors =
                             unsafe { selectors.get_unchecked(tree_start..tree_end) };
@@ -344,23 +371,30 @@ where
 }
 
 #[pyfunction]
-#[pyo3(signature = (selectors, indices, data, leaf_count, weights = None, num_threads = 0))]
+#[pyo3(signature = (selectors, node_offsets, leaf_offsets, data, weights = None, num_threads = 0))]
 pub(crate) fn calc_paths_sum_transpose<'py>(
     py: Python<'py>,
     selectors: Bound<'py, PyArray1<Selector>>,
-    indices: Bound<'py, PyArray1<i64>>,
+    node_offsets: Bound<'py, PyArray1<usize>>,
+    leaf_offsets: Bound<'py, PyArray1<usize>>,
     data: Data<'py>,
-    leaf_count: usize,
     weights: Option<Bound<'py, PyArray1<f64>>>,
     num_threads: usize,
 ) -> PyResult<Bound<'py, PyArray1<f64>>> {
-    data.calc_paths_sum_transpose(py, selectors, indices, leaf_count, weights, num_threads)
+    data.calc_paths_sum_transpose(
+        py,
+        selectors,
+        node_offsets,
+        leaf_offsets,
+        weights,
+        num_threads,
+    )
 }
 
 fn calc_paths_sum_transpose_impl<T>(
     selectors: ArrayView1<Selector>,
-    indices: ArrayView1<i64>,
-    leaf_count: usize,
+    node_offsets: ArrayView1<usize>,
+    leaf_offsets: ArrayView1<usize>,
     data: ArrayView2<T>,
     weights: Option<ArrayView1<f64>>,
     num_threads: usize,
@@ -369,31 +403,40 @@ where
     T: Copy + Send + Sync + PartialOrd + 'static,
     f64: AsPrimitive<T>,
 {
-    // We need leaf_offsets instead of leaf_counts here.
-    // It would allow to split the array and write safely from multiple threads.
-    let values = Arc::new((0..leaf_count).map(|_| Mutex::new(0.0)).collect::<Vec<_>>());
+    let selectors = selectors
+        .as_slice()
+        .expect("Cannot get selectors slice from ArrayView");
+    let leaf_offsets = leaf_offsets
+        .as_slice()
+        .expect("Cannot get leaf_offsets slice from ArrayView");
 
-    let selectors = selectors.as_slice().unwrap();
+    let leaf_count = *leaf_offsets
+        .last()
+        .expect("leaf_offsets array cannot be empty") as usize;
+    let mut values = vec![0.0; leaf_count];
+    let values_iter = mut_slices::MutSlices::new(&mut values, leaf_offsets);
 
     rayon::ThreadPoolBuilder::new()
         .num_threads(num_threads)
         .build()
         .expect("Cannot build rayon ThreadPool")
         .install(|| {
-            indices
+            node_offsets
                 .iter()
                 .map(|i| *i as usize)
                 .tuple_windows()
-                .zip(iter::repeat_with(|| values.clone()))
+                .zip(values_iter)
+                .zip(leaf_offsets)
                 .par_bridge()
-                .for_each(|((tree_start, tree_end), values)| {
+                .for_each(|(((tree_start, tree_end), values), &leaf_offset)| {
                     for (x_index, sample) in data.axis_iter(Axis(0)).enumerate() {
                         let tree_selectors =
                             unsafe { selectors.get_unchecked(tree_start..tree_end) };
 
                         let leaf = find_leaf(tree_selectors, sample.as_slice().unwrap());
 
-                        let mut value = values[leaf.left as usize].lock().unwrap();
+                        let value =
+                            unsafe { values.get_unchecked_mut(leaf.left as usize - leaf_offset) };
                         if let Some(weights) = weights {
                             *value += weights[x_index] * leaf.value;
                         } else {
@@ -403,28 +446,24 @@ where
                 })
         });
 
-    Arc::try_unwrap(values)
-        .unwrap()
-        .into_iter()
-        .map(|mutex| mutex.into_inner().unwrap())
-        .collect()
+    values.into()
 }
 
 #[pyfunction]
-#[pyo3(signature = (selectors, indices, data, num_threads = 0))]
+#[pyo3(signature = (selectors, node_offsets, data, num_threads = 0))]
 pub(crate) fn calc_feature_delta_sum<'py>(
     py: Python<'py>,
     selectors: Bound<'py, PyArray1<Selector>>,
-    indices: Bound<'py, PyArray1<i64>>,
+    node_offsets: Bound<'py, PyArray1<usize>>,
     data: Data<'py>,
     num_threads: usize,
 ) -> PyResult<(Bound<'py, PyArray2<f64>>, Bound<'py, PyArray2<i64>>)> {
-    data.calc_feature_delta_sum(py, selectors, indices, num_threads)
+    data.calc_feature_delta_sum(py, selectors, node_offsets, num_threads)
 }
 
 fn calc_feature_delta_sum_impl<T>(
     selectors: ArrayView1<Selector>,
-    indices: ArrayView1<i64>,
+    node_offsets: ArrayView1<usize>,
     data: ArrayView2<T>,
     num_threads: usize,
 ) -> (Array2<f64>, Array2<i64>)
@@ -432,7 +471,7 @@ where
     T: Copy + Send + Sync + PartialOrd + 'static,
     f64: AsPrimitive<T>,
 {
-    let indices = indices.as_slice().unwrap();
+    let node_offsets = node_offsets.as_slice().unwrap();
     let selectors = selectors.as_slice().unwrap();
 
     let mut delta_sum = Array2::zeros((data.nrows(), data.ncols()));
@@ -448,7 +487,7 @@ where
                 .and(hit_count.rows_mut())
                 .par_for_each(|sample, mut delta_sum_row, mut hit_count_row| {
                     for (tree_start, tree_end) in
-                        indices.iter().map(|i| *i as usize).tuple_windows()
+                        node_offsets.iter().map(|i| *i as usize).tuple_windows()
                     {
                         let tree_selectors =
                             unsafe { selectors.get_unchecked(tree_start..tree_end) };

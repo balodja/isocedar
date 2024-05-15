@@ -14,7 +14,7 @@ __all__ = ["AADForest"]
 class AADEvaluator(ConiferestEvaluator):
     def __init__(self, aad):
         super(AADEvaluator, self).__init__(aad, map_value=lambda x: -np.reciprocal(x))
-        self.weights = np.full(shape=(self.leaf_count,), fill_value=np.reciprocal(np.sqrt(self.leaf_count)))
+        self.weights = np.full(shape=(self.n_leaves,), fill_value=np.reciprocal(np.sqrt(self.n_leaves)))
 
     def score_samples(self, x, weights=None):
         """
@@ -37,7 +37,7 @@ class AADEvaluator(ConiferestEvaluator):
         if weights is None:
             weights = self.weights
 
-        return calc_paths_sum(self.selectors, self.indices, x, weights, num_threads=self.num_threads)
+        return calc_paths_sum(self.selectors, self.node_offsets, x, weights, num_threads=self.num_threads)
 
     def loss(
         self,
@@ -106,9 +106,9 @@ class AADEvaluator(ConiferestEvaluator):
 
         grad = calc_paths_sum_transpose(
             self.selectors,
-            self.indices,
+            self.node_offsets,
+            self.leaf_offsets,
             known_data,
-            self.leaf_count,
             sample_weights,
             num_threads=self.num_threads,
         )
@@ -173,11 +173,7 @@ class AADForest(Coniferest):
         random_seed=None,
     ):
         super().__init__(
-            trees=[],
-            n_subsamples=n_subsamples,
-            max_depth=max_depth,
-            n_jobs=n_jobs,
-            random_seed=random_seed,
+            trees=[], n_subsamples=n_subsamples, max_depth=max_depth, n_jobs=n_jobs, random_seed=random_seed
         )
         self.n_trees = n_trees
         self.tau = tau
@@ -270,26 +266,12 @@ class AADForest(Coniferest):
 
         def fun(weights):
             return self.evaluator.loss(
-                weights,
-                known_data,
-                known_labels,
-                anomaly_count,
-                nominal_count,
-                q_tau,
-                self.C_a,
-                prior_influence,
+                weights, known_data, known_labels, anomaly_count, nominal_count, q_tau, self.C_a, prior_influence
             )
 
         def jac(weights):
             return self.evaluator.loss_gradient(
-                weights,
-                known_data,
-                known_labels,
-                anomaly_count,
-                nominal_count,
-                q_tau,
-                self.C_a,
-                prior_influence,
+                weights, known_data, known_labels, anomaly_count, nominal_count, q_tau, self.C_a, prior_influence
             )
 
         def hessp(weights, vector):
@@ -305,14 +287,7 @@ class AADForest(Coniferest):
                 prior_influence,
             )
 
-        res = minimize(
-            fun,
-            self.evaluator.weights,
-            method="trust-krylov",
-            jac=jac,
-            hessp=hessp,
-            tol=1e-4,
-        )
+        res = minimize(fun, self.evaluator.weights, method="trust-krylov", jac=jac, hessp=hessp, tol=1e-4)
         weights_norm = np.sqrt(np.inner(res.x, res.x))
         self.evaluator.weights = res.x / weights_norm
 

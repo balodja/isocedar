@@ -10,7 +10,7 @@ __all__ = ["ForestEvaluator"]
 class ForestEvaluator:
     selector_dtype = selector_dtype
 
-    def __init__(self, samples, selectors, indices, leaf_count, *, num_threads):
+    def __init__(self, samples, selectors, node_offsets, leaf_offsets, *, num_threads):
         """
         Base class for the forest evaluators. Does the trivial job:
         * runs calc_paths_sum written in cython,
@@ -24,13 +24,13 @@ class ForestEvaluator:
         selectors
             Array with all the nodes of all the trees.
 
-        indices
-            Indices of starting and ending nodes of every tree. For example
-            for two trees of length `len1` and `len2` it would be:
+        node_offsets
+            Offsets for tree indices for node-sized arrays. For example
+            for two trees of node-length `len1` and `len2` it would be:
             [0, len1, len1 + len2]
 
-        leaf_count
-            Total number of leafs in all the trees.
+        leaf_offsets
+            Offsets for tree indices for leaf-sized arrays.
 
         num_threads : int or None
             Number of threads to use for calculations. If None then
@@ -38,13 +38,12 @@ class ForestEvaluator:
         self.samples = samples
 
         self.selectors = selectors
-        self.indices = indices
-        self.leaf_count = leaf_count
+        self.node_offsets = node_offsets
+        self.leaf_offsets = leaf_offsets
 
         if num_threads is None or num_threads < 1:
             # Count of available CPUs is not a simple thing, see loky's implementation here:
             # https://github.com/joblib/joblib/blob/476ff8e62b221fc5816bad9b55dec8883d4f157c/joblib/externals/loky/backend/context.py#L83
-            # We ignore OMP_NUM_THREADS for now
             self.num_threads = joblib.cpu_count()
         else:
             self.num_threads = num_threads
@@ -53,7 +52,7 @@ class ForestEvaluator:
     def combine_selectors(cls, selectors_list):
         """
         Combine several node arrays into one array of nodes and one array of
-        start indices.
+        start node_offsets.
 
         Parameters
         ----------
@@ -62,27 +61,43 @@ class ForestEvaluator:
 
         Returns
         -------
-        Pair of two arrays: node array and array of starting indices.
+        np.ndarray of selectors
+            Node array with all the nodes from all the trees.
+        np.ndarray of int
+            Array of tree offsets for node-arrays.
+        np.ndarray of int
+            Array of tree offsets for leaf-arrays.
         """
         lens = [len(sels) for sels in selectors_list]
         full_len = sum(lens)
 
         selectors = np.empty((full_len,), dtype=cls.selector_dtype)
 
-        indices = np.empty((len(selectors_list) + 1,), dtype=np.int64)
-        indices[0] = 0
-        indices[1:] = np.add.accumulate(lens)
+        node_offsets = np.zeros((len(selectors_list) + 1,), dtype=np.uintp)
+        node_offsets[1:] = np.add.accumulate(lens)
 
         for i in range(len(selectors_list)):
-            selectors[indices[i] : indices[i + 1]] = selectors_list[i]
+            selectors[node_offsets[i] : node_offsets[i + 1]] = selectors_list[i]
 
         # Assign a unique sequential index to every leaf
         # The index is used for weighted scores
         leaf_mask = selectors["feature"] < 0
         leaf_count = np.count_nonzero(leaf_mask)
+
+        leaf_offsets = np.full_like(node_offsets, leaf_count)
+        leaf_offsets[:-1] = np.cumsum(leaf_mask)[node_offsets[:-1]]
+
         selectors["left"][leaf_mask] = np.arange(0, leaf_count)
 
-        return selectors, indices, leaf_count
+        return selectors, node_offsets, leaf_offsets
+
+    @property
+    def n_trees(self):
+        return self.node_offsets.shape[0] - 1
+
+    @property
+    def n_leaves(self):
+        return self.leaf_offsets[-1]
 
     def score_samples(self, x):
         """
@@ -100,13 +115,11 @@ class ForestEvaluator:
         if not x.flags["C_CONTIGUOUS"]:
             x = np.ascontiguousarray(x)
 
-        trees = self.indices.shape[0] - 1
-
         return -(
             2
             ** (
-                -calc_paths_sum(self.selectors, self.indices, x, num_threads=self.num_threads)
-                / (self.average_path_length(self.samples) * trees)
+                -calc_paths_sum(self.selectors, self.node_offsets, x, num_threads=self.num_threads)
+                / (self.average_path_length(self.samples) * self.n_trees)
             )
         )
 
@@ -114,7 +127,7 @@ class ForestEvaluator:
         if not x.flags["C_CONTIGUOUS"]:
             x = np.ascontiguousarray(x)
 
-        return calc_feature_delta_sum(self.selectors, self.indices, x, num_threads=self.num_threads)
+        return calc_feature_delta_sum(self.selectors, self.node_offsets, x, num_threads=self.num_threads)
 
     def feature_signature(self, x):
         delta_sum, hit_count = self._feature_delta_sum(x)
