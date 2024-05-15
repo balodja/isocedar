@@ -6,7 +6,6 @@
 ![Build and publish wheels](https://github.com/snad-space/coniferest/actions/workflows/wheels.yml/badge.svg)
 [![pre-commit.ci status](https://results.pre-commit.ci/badge/github/snad-space/coniferest/master.svg)](https://results.pre-commit.ci/latest/github/snad-space/coniferest/master)
 
-
 Package for active anomaly detection with isolation forests, made by [SNAD collaboration](https://snad.space/).
 
 It includes:
@@ -60,4 +59,3 @@ Most of the benchmarks have `n_jobs` fixture set to 1 by default, you can change
 You can adjust the minimum number of iterations with `--benchmark-min-rounds` and maximum execution time per benchmark with `--benchmark-max-time` (note that the latter can be exceeded if the minimum number of rounds is not reached).
 See `pyproject.toml` for the default benchmarking options.
 You can make a snapshot the current benchmark result with `--benchmark-save=NAME` or with `--benchmark-autosave`, and compare benchmarks with `pytest-benchmark compare` command.
-
