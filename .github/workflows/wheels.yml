@@ -7,7 +7,7 @@ on:
 
 jobs:
   build_wheels:
-    name: Wheels on ${{ matrix.os }} with CIBW_ARCHS=${{ matrix.archs }}
+    name: Wheels ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -15,41 +15,49 @@ jobs:
         # Numpy provides wheels for x86_64 and aarch64 only, we do the same
         include:
           - os: ubuntu-latest
-            archs: x86_64 aarch64
+            name: "Manylinux x86_64"
+            flags: "--zig --target=x86_64-unknown-linux-gnu --compatibility=manylinux2014"
+          - os: ubuntu-latest
+            name: "Manylinux aarch64"
+            flags: "--zig --target=aarch64-unknown-linux-gnu --compatibility=manylinux2014"
           - os: macos-latest
-            archs: x86_64
-          - os: macos-latest
-            archs: arm64
+            name: "Universal2 macOS"
+            flags: "--target=universal2-apple-darwin"
           - os: windows-latest
-            archs: auto
+            name: "Windows x86_64"
+            flags: ""
     steps:
       - uses: actions/checkout@v4
-      - name: Set up QEMU
-        if: ${{ runner.os == 'Linux' }}
-        uses: docker/setup-qemu-action@v3
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
-          platforms: all
-      - name: Set up OpenMP
-        # We cannot make OpenMP work for cross-compiled ARM64 macOS wheels, so we do it for x86_64 only
-        if: ${{ runner.os == 'macOS' && matrix.archs == 'x86_64' }}
-        # For OpenMP support we use the LLVM toolchain from Homebrew with libomp.
-        # It looks like LLVM gives faster code than GCC does.
+          python-version: 3.9
+      - name: Install maturin
         run: |
-          brew install llvm libomp
-          echo "CC=$(brew --prefix llvm)/bin/clang" >> $GITHUB_ENV
-          echo "CONIFEREST_FORCE_OPENMP_ON_MACOS=1" >> $GITHUB_ENV
+          pip install maturin
+      - name: Install zig on Linux
+        if: ${{ runner.os == 'Linux' }}
+        run: |
+          pip install ziglang
+      - name: Set up Rust on Linux
+        if: ${{ runner.os == 'Linux' }}
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu,x86_64-unknown-linux-gnu
+      - name: Set up Rust on macOS
+        if: ${{ runner.os == 'macos' }}
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
       - name: Build wheels
-        uses: pypa/cibuildwheel@v2.20.0
-        env:
-          CIBW_ARCHS: ${{ matrix.archs }}
-          # We skip MUSL (no numpy binary wheels) and PyPy
-          CIBW_SKIP: "pp* *musl*"
+        run: |
+          maturin build --release -o dist ${{ matrix.flags }}
       - uses: actions/upload-artifact@v4
         with:
-          path: wheelhouse/*.whl
+          path: dist/*.whl
           if-no-files-found: error
-          name: "artifact_${{ matrix.os }}_${{ matrix.archs }}"
-  
+          name: "artifact_${{ matrix.name }}"
+
   make_sdist:
     name: Make SDist
     runs-on: ubuntu-latest
@@ -62,7 +70,7 @@ jobs:
           path: dist/*.tar.gz
           if-no-files-found: error
           name: artifact_sdist
-  
+
   publish:
     needs: [ build_wheels, make_sdist ]
     runs-on: ubuntu-latest
