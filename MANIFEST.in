@@ -1,3 +1,0 @@
-include README.md
-include src/coniferest/*.pxd
-include src/coniferest/*.pyx
