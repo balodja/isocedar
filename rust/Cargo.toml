@@ -11,6 +11,11 @@ crate-type = ["cdylib"]
 [profile.dev]
 opt-level = 3
 
+# Makes linking slower, but the resulting extension module is faster
+[profile.release]
+lto = true
+codegen-units = 1
+
 [features]
 default = ["pyo3/abi3-py39"]
 
