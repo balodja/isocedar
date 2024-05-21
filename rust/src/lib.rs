@@ -1,81 +1,18 @@
 mod mut_slices;
+mod selector;
 
+use crate::mut_slices::MutSlices;
+use crate::selector::Selector;
 use enum_dispatch::enum_dispatch;
 use itertools::Itertools;
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis, Zip};
 use num_traits::AsPrimitive;
 use numpy::PyArrayMethods;
-use numpy::{Element, PyArray, PyArrayDescr};
+use numpy::{Element, PyArray};
 use numpy::{PyArray1, PyArray2};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::py_run;
-use pyo3::types::PyDict;
 use rayon::prelude::*;
-
-/// Selector is the representation of decision tree nodes: either branches or leafs.
-///
-/// We use "C"-representation with standard alignment (np.dtype(align=True)), but "packed"
-/// (dtype(aligh=False)) would work as well.
-#[derive(Copy, Clone, Debug)]
-#[repr(C)]
-pub(crate) struct Selector {
-    /// Feature index to branch on, -1.0 if leaf
-    feature: i32,
-    /// Index of left subtree, leaf_id if leaf
-    left: i32,
-    /// Feature value to branch on, resulting decision score if leaf
-    value: f64,
-    /// Index of right subtree, -1 if leaf
-    right: i32,
-    /// Natural logarithm of the number of samples in the node
-    log_n_node_samples: f32,
-}
-
-impl Selector {
-    pub(crate) fn dtype(py: Python) -> PyResult<Bound<PyArrayDescr>> {
-        let locals = PyDict::new_bound(py);
-        py_run!(
-            py,
-            *locals,
-            r#"
-            dtype = __import__('numpy').dtype(
-                [
-                    ('feature', 'i4'),
-                    ('left', 'i4'),
-                    ('value', 'f8'),
-                    ('right', 'i4'),
-                    ('log_n_node_samples', 'f4')
-                ],
-                align=True,
-            )
-            "#
-        );
-        Ok(locals
-            .get_item("dtype")
-            .expect("Error in built-in Python code for dtype initialization")
-            .expect("Error in built-in Python code for dtype initialization: dtype cannot be None")
-            .downcast::<PyArrayDescr>()?
-            .clone())
-    }
-
-    #[inline(always)]
-    pub(crate) fn is_leaf(&self) -> bool {
-        self.feature == -1
-    }
-}
-
-/// Implementation of [numpy::Element] for [Selector]
-///
-/// Safety: we guarantee that [Selector] has the same layout as it would have in numpy with
-/// [Selector::dtype]
-unsafe impl Element for Selector {
-    const IS_COPY: bool = true;
-
-    fn get_dtype_bound(py: Python) -> Bound<PyArrayDescr> {
-        Self::dtype(py).unwrap()
-    }
-}
 
 #[enum_dispatch]
 trait DataTrait<'py> {
@@ -414,7 +351,7 @@ where
         .last()
         .expect("leaf_offsets array cannot be empty") as usize;
     let mut values = vec![0.0; leaf_count];
-    let values_iter = mut_slices::MutSlices::new(&mut values, leaf_offsets);
+    let values_iter = MutSlices::new(&mut values, leaf_offsets);
 
     rayon::ThreadPoolBuilder::new()
         .num_threads(num_threads)
