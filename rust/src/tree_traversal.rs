@@ -10,6 +10,8 @@ use pyo3::prelude::PyAnyMethods;
 use pyo3::{pyfunction, Bound, FromPyObject, PyResult, Python};
 use rayon::iter::{ParallelBridge, ParallelIterator};
 
+type DeltaSumHitCount<'py> = (Bound<'py, PyArray2<f64>>, Bound<'py, PyArray2<i64>>);
+
 #[enum_dispatch]
 trait DataTrait<'py> {
     fn calc_paths_sum(
@@ -37,7 +39,7 @@ trait DataTrait<'py> {
         selectors: Bound<'py, PyArray1<Selector>>,
         node_offsets: Bound<'py, PyArray1<usize>>,
         num_threads: usize,
-    ) -> PyResult<(Bound<'py, PyArray2<f64>>, Bound<'py, PyArray2<i64>>)>;
+    ) -> PyResult<DeltaSumHitCount<'py>>;
 }
 
 impl<'py, T> DataTrait<'py> for Bound<'py, PyArray2<T>>
@@ -125,7 +127,7 @@ where
         selectors: Bound<'py, PyArray1<Selector>>,
         node_offsets: Bound<'py, PyArray1<usize>>,
         num_threads: usize,
-    ) -> PyResult<(Bound<'py, PyArray2<f64>>, Bound<'py, PyArray2<i64>>)> {
+    ) -> PyResult<DeltaSumHitCount<'py>> {
         let selectors = selectors.readonly();
         let selectors_view = selectors.as_array();
         check_selectors(selectors_view)?;
@@ -199,7 +201,7 @@ fn check_node_offsets(node_offsets: ArrayView1<usize>, selectors_length: usize) 
                 ));
             }
         }
-        if node_offsets[node_offsets.len() - 1] as usize > selectors_length {
+        if node_offsets[node_offsets.len() - 1] > selectors_length {
             return Err(PyValueError::new_err(
                 "node_offsets are out of range of the selectors",
             ));
@@ -283,9 +285,7 @@ where
             Zip::from(paths.view_mut())
                 .and(data.rows())
                 .par_for_each(|path, sample| {
-                    for (tree_start, tree_end) in
-                        node_offsets.iter().map(|i| *i as usize).tuple_windows()
-                    {
+                    for (tree_start, tree_end) in node_offsets.iter().copied().tuple_windows() {
                         let tree_selectors =
                             unsafe { selectors.get_unchecked(tree_start..tree_end) };
 
@@ -345,7 +345,7 @@ where
 
     let leaf_count = *leaf_offsets
         .last()
-        .expect("leaf_offsets array cannot be empty") as usize;
+        .expect("leaf_offsets array cannot be empty");
     let mut values = vec![0.0; leaf_count];
     let values_iter = MutSlices::new(&mut values, leaf_offsets);
 
@@ -356,7 +356,7 @@ where
         .install(|| {
             node_offsets
                 .iter()
-                .map(|i| *i as usize)
+                .copied()
                 .tuple_windows()
                 .zip(values_iter)
                 .zip(leaf_offsets)
@@ -390,7 +390,7 @@ pub(crate) fn calc_feature_delta_sum<'py>(
     node_offsets: Bound<'py, PyArray1<usize>>,
     data: Data<'py>,
     num_threads: usize,
-) -> PyResult<(Bound<'py, PyArray2<f64>>, Bound<'py, PyArray2<i64>>)> {
+) -> PyResult<DeltaSumHitCount<'py>> {
     data.calc_feature_delta_sum(py, selectors, node_offsets, num_threads)
 }
 
@@ -419,9 +419,7 @@ where
                 .and(delta_sum.rows_mut())
                 .and(hit_count.rows_mut())
                 .par_for_each(|sample, mut delta_sum_row, mut hit_count_row| {
-                    for (tree_start, tree_end) in
-                        node_offsets.iter().map(|i| *i as usize).tuple_windows()
-                    {
+                    for (tree_start, tree_end) in node_offsets.iter().copied().tuple_windows() {
                         let tree_selectors =
                             unsafe { selectors.get_unchecked(tree_start..tree_end) };
 
