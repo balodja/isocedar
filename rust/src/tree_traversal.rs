@@ -474,10 +474,13 @@ fn calc_feature_delta_sum_impl<T>(
                             };
 
                             let child_selector = unsafe { tree_selectors.get_unchecked(i) };
+                            // Here we cast to f64 following the original Cython implementation, but
+                            // it is a subject to change.
                             *unsafe { delta_sum_row.uget_mut(parent_selector.feature as usize) } +=
                                 1.0 + 2.0
-                                    * (child_selector.log_n_node_samples as f64
-                                        - parent_selector.log_n_node_samples as f64);
+                                    * (child_selector.log_n_node_samples
+                                        - parent_selector.log_n_node_samples)
+                                        as f64;
                             *unsafe { hit_count_row.uget_mut(parent_selector.feature as usize) } +=
                                 1;
                         }
