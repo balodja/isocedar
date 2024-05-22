@@ -314,28 +314,33 @@ fn calc_paths_sum_impl<T>(
     let node_offsets = node_offsets.as_slice().unwrap();
     let selectors = selectors.as_slice().unwrap();
 
-    rayon::ThreadPoolBuilder::new()
-        .num_threads(num_threads)
-        .build()
-        .expect("Cannot build rayon ThreadPool")
-        .install(|| {
-            Zip::from(paths)
-                .and(data.rows())
-                .par_for_each(|path, sample| {
-                    for (tree_start, tree_end) in node_offsets.iter().copied().tuple_windows() {
-                        let tree_selectors =
-                            unsafe { selectors.get_unchecked(tree_start..tree_end) };
+    let inner_fn = |path: &mut f64, sample: ArrayView1<T>| {
+        for (tree_start, tree_end) in node_offsets.iter().copied().tuple_windows() {
+            let tree_selectors = unsafe { selectors.get_unchecked(tree_start..tree_end) };
 
-                        let leaf = find_leaf(tree_selectors, sample.as_slice().unwrap());
+            let leaf = find_leaf(tree_selectors, sample.as_slice().unwrap());
 
-                        if let Some(weights) = weights {
-                            *path += *unsafe { weights.uget(leaf.left as usize) } * leaf.value;
-                        } else {
-                            *path += leaf.value;
-                        }
-                    }
-                })
-        });
+            if let Some(weights) = weights {
+                *path += *unsafe { weights.uget(leaf.left as usize) } * leaf.value;
+            } else {
+                *path += leaf.value;
+            }
+        }
+    };
+
+    let zip = Zip::from(paths).and(data.rows());
+
+    if num_threads == 1 {
+        zip.for_each(inner_fn);
+    } else {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(num_threads)
+            .build()
+            .expect("Cannot build rayon ThreadPool")
+            .install(|| {
+                zip.par_for_each(inner_fn);
+            });
+    }
 }
 
 #[pyfunction]
@@ -385,35 +390,40 @@ fn calc_paths_sum_transpose_impl<T>(
         leaf_offsets,
     );
 
-    rayon::ThreadPoolBuilder::new()
-        .num_threads(num_threads)
-        .build()
-        .expect("Cannot build rayon ThreadPool")
-        .install(|| {
-            node_offsets
-                .iter()
-                .copied()
-                .tuple_windows()
-                .zip(values_iter)
-                .zip(leaf_offsets)
-                .par_bridge()
-                .for_each(|(((tree_start, tree_end), values), &leaf_offset)| {
-                    for (x_index, sample) in data.axis_iter(Axis(0)).enumerate() {
-                        let tree_selectors =
-                            unsafe { selectors.get_unchecked(tree_start..tree_end) };
+    let inner_fn =
+        |(((tree_start, tree_end), values), &leaf_offset): (((usize, usize), &mut [f64]), _)| {
+            for (x_index, sample) in data.axis_iter(Axis(0)).enumerate() {
+                let tree_selectors = unsafe { selectors.get_unchecked(tree_start..tree_end) };
 
-                        let leaf = find_leaf(tree_selectors, sample.as_slice().unwrap());
+                let leaf = find_leaf(tree_selectors, sample.as_slice().unwrap());
 
-                        let value =
-                            unsafe { values.get_unchecked_mut(leaf.left as usize - leaf_offset) };
-                        if let Some(weights) = weights {
-                            *value += weights[x_index] * leaf.value;
-                        } else {
-                            *value += leaf.value;
-                        }
-                    }
-                })
-        });
+                let value = unsafe { values.get_unchecked_mut(leaf.left as usize - leaf_offset) };
+                if let Some(weights) = weights {
+                    *value += weights[x_index] * leaf.value;
+                } else {
+                    *value += leaf.value;
+                }
+            }
+        };
+
+    let iter = node_offsets
+        .iter()
+        .copied()
+        .tuple_windows()
+        .zip(values_iter)
+        .zip(leaf_offsets);
+
+    if num_threads == 1 {
+        iter.for_each(inner_fn);
+    } else {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(num_threads)
+            .build()
+            .expect("Cannot build rayon ThreadPool")
+            .install(|| {
+                iter.par_bridge().for_each(inner_fn);
+            });
+    }
 }
 
 #[pyfunction]
@@ -442,49 +452,53 @@ fn calc_feature_delta_sum_impl<T>(
     let node_offsets = node_offsets.as_slice().unwrap();
     let selectors = selectors.as_slice().unwrap();
 
-    rayon::ThreadPoolBuilder::new()
-        .num_threads(num_threads)
-        .build()
-        .expect("Cannot build rayon ThreadPool")
-        .install(|| {
-            Zip::from(data.rows())
-                .and(delta_sum.rows_mut())
-                .and(hit_count.rows_mut())
-                .par_for_each(|sample, mut delta_sum_row, mut hit_count_row| {
-                    for (tree_start, tree_end) in node_offsets.iter().copied().tuple_windows() {
-                        let tree_selectors =
-                            unsafe { selectors.get_unchecked(tree_start..tree_end) };
+    let inner_fn = |sample: ArrayView1<T>,
+                    mut delta_sum_row: ArrayViewMut1<f64>,
+                    mut hit_count_row: ArrayViewMut1<i64>| {
+        for (tree_start, tree_end) in node_offsets.iter().copied().tuple_windows() {
+            let tree_selectors = unsafe { selectors.get_unchecked(tree_start..tree_end) };
 
-                        let mut i = 0;
-                        let mut parent_selector: &Selector;
-                        loop {
-                            parent_selector = unsafe { tree_selectors.get_unchecked(i) };
-                            if parent_selector.is_leaf() {
-                                break;
-                            }
+            let mut i = 0;
+            let mut parent_selector: &Selector;
+            loop {
+                parent_selector = unsafe { tree_selectors.get_unchecked(i) };
+                if parent_selector.is_leaf() {
+                    break;
+                }
 
-                            // TODO: do opposite type casting: what if we trained on huge f64 and predict on f32?
-                            let threshold: T = parent_selector.value.as_();
-                            i = if *unsafe { sample.uget(parent_selector.feature as usize) }
-                                <= threshold
-                            {
-                                parent_selector.left as usize
-                            } else {
-                                parent_selector.right as usize
-                            };
+                // TODO: do opposite type casting: what if we trained on huge f64 and predict on f32?
+                let threshold: T = parent_selector.value.as_();
+                i = if *unsafe { sample.uget(parent_selector.feature as usize) } <= threshold {
+                    parent_selector.left as usize
+                } else {
+                    parent_selector.right as usize
+                };
 
-                            let child_selector = unsafe { tree_selectors.get_unchecked(i) };
-                            // Here we cast to f64 following the original Cython implementation, but
-                            // it is a subject to change.
-                            *unsafe { delta_sum_row.uget_mut(parent_selector.feature as usize) } +=
-                                1.0 + 2.0
-                                    * (child_selector.log_n_node_samples
-                                        - parent_selector.log_n_node_samples)
-                                        as f64;
-                            *unsafe { hit_count_row.uget_mut(parent_selector.feature as usize) } +=
-                                1;
-                        }
-                    }
-                });
-        });
+                let child_selector = unsafe { tree_selectors.get_unchecked(i) };
+                // Here we cast to f64 following the original Cython implementation, but
+                // it is a subject to change.
+                *unsafe { delta_sum_row.uget_mut(parent_selector.feature as usize) } += 1.0
+                    + 2.0
+                        * (child_selector.log_n_node_samples - parent_selector.log_n_node_samples)
+                            as f64;
+                *unsafe { hit_count_row.uget_mut(parent_selector.feature as usize) } += 1;
+            }
+        }
+    };
+
+    let zip = Zip::from(data.rows())
+        .and(delta_sum.rows_mut())
+        .and(hit_count.rows_mut());
+
+    if num_threads == 1 {
+        zip.for_each(inner_fn);
+    } else {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(num_threads)
+            .build()
+            .expect("Cannot build rayon ThreadPool")
+            .install(|| {
+                zip.par_for_each(inner_fn);
+            });
+    }
 }
