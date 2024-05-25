@@ -1,5 +1,6 @@
 mod mut_slices;
 mod selector;
+mod thread_pool;
 mod tree_traversal;
 
 use crate::selector::Selector;

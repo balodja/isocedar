@@ -29,3 +29,5 @@ num-traits = "0.2"
 numpy = "0.21"
 # Needs to be consistent with rayon dependecy in ndarray
 rayon = "1.9"
+serde = { version = "1.0", features = ["derive"] }
+serde-pickle = "1.1"
