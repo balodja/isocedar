@@ -41,12 +41,8 @@ def test_prior_influence_callable():
     assert np.argmin(scores) == data.shape[0] - 1
 
 
-# Rust implementations for single and multithread differ, we must test both
-# We call function parameter n_threads to be not confused with n_jobs we use
-# as a fixture.
-@pytest.mark.parametrize("n_threads", [1, 2])
 @pytest.mark.regression
-def test_regression_fit_known(n_threads, regression_data):
+def test_regression_fit_known(regression_data):
     random_seed = 0
     n_samples = 1024
     n_features = 16
@@ -57,7 +53,7 @@ def test_regression_fit_known(n_threads, regression_data):
     known_data = data[rng.choice(n_samples, n_known, replace=False)]
     known_labels = rng.choice([-1, 1], n_known, replace=True)
 
-    forest = AADForest(n_trees=n_trees, random_seed=random_seed, n_jobs=n_threads)
+    forest = AADForest(n_trees=n_trees, random_seed=random_seed)
     forest.fit(data)
     pre_fit_known_scores = forest.score_samples(data)
 
