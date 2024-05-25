@@ -1,14 +1,17 @@
-use crate::mut_slices::MutSlices;
 use crate::selector::Selector;
+use crate::tree_traversal::calc_paths_sum_transpose_impl::calc_paths_sum_transpose_impl;
+use crate::tree_traversal::find_leaf::find_leaf;
 use enum_dispatch::enum_dispatch;
 use itertools::Itertools;
-use ndarray::{ArrayView1, ArrayView2, ArrayViewMut1, ArrayViewMut2, Axis, Zip};
+use ndarray::{ArrayView1, ArrayView2, ArrayViewMut1, ArrayViewMut2, Zip};
 use num_traits::AsPrimitive;
 use numpy::{Element, PyArray1, PyArray2, PyArrayMethods};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::PyAnyMethods;
 use pyo3::{pyfunction, Bound, FromPyObject, PyResult, Python};
-use rayon::iter::{ParallelBridge, ParallelIterator};
+
+mod calc_paths_sum_transpose_impl;
+mod find_leaf;
 
 type DeltaSumHitCount<'py> = (Bound<'py, PyArray2<f64>>, Bound<'py, PyArray2<i64>>);
 
@@ -193,30 +196,6 @@ pub(crate) enum Data<'py> {
     F32(Bound<'py, PyArray2<f32>>),
 }
 
-// It looks like the performance is not affected by returning a copy of Selector, not reference.
-#[inline]
-fn find_leaf<T>(tree: &[Selector], sample: &[T]) -> Selector
-where
-    T: Copy + Send + Sync + PartialOrd + 'static,
-    f64: AsPrimitive<T>,
-{
-    let mut i = 0;
-    loop {
-        let selector = *unsafe { tree.get_unchecked(i) };
-        if selector.is_leaf() {
-            break selector;
-        }
-
-        // TODO: do opposite type casting: what if we trained on huge f64 and predict on f32?
-        let threshold: T = selector.value.as_();
-        i = if *unsafe { sample.get_unchecked(selector.feature as usize) } <= threshold {
-            selector.left as usize
-        } else {
-            selector.right as usize
-        };
-    }
-}
-
 #[inline]
 fn check_selectors(selectors: ArrayView1<Selector>) -> PyResult<()> {
     if !selectors.is_standard_layout() {
@@ -362,68 +341,6 @@ pub(crate) fn calc_paths_sum_transpose<'py>(
         weights,
         num_threads,
     )
-}
-
-fn calc_paths_sum_transpose_impl<T>(
-    selectors: ArrayView1<Selector>,
-    node_offsets: ArrayView1<usize>,
-    leaf_offsets: ArrayView1<usize>,
-    data: ArrayView2<T>,
-    weights: Option<ArrayView1<f64>>,
-    num_threads: usize,
-    mut values: ArrayViewMut1<f64>,
-) where
-    T: Copy + Send + Sync + PartialOrd + 'static,
-    f64: AsPrimitive<T>,
-{
-    let selectors = selectors
-        .as_slice()
-        .expect("Cannot get selectors slice from ArrayView");
-    let leaf_offsets = leaf_offsets
-        .as_slice()
-        .expect("Cannot get leaf_offsets slice from ArrayView");
-
-    let values_iter = MutSlices::new(
-        values
-            .as_slice_mut()
-            .expect("values must be contiguous and in memory order"),
-        leaf_offsets,
-    );
-
-    let inner_fn =
-        |(((tree_start, tree_end), values), &leaf_offset): (((usize, usize), &mut [f64]), _)| {
-            for (x_index, sample) in data.axis_iter(Axis(0)).enumerate() {
-                let tree_selectors = unsafe { selectors.get_unchecked(tree_start..tree_end) };
-
-                let leaf = find_leaf(tree_selectors, sample.as_slice().unwrap());
-
-                let value = unsafe { values.get_unchecked_mut(leaf.left as usize - leaf_offset) };
-                if let Some(weights) = weights {
-                    *value += weights[x_index] * leaf.value;
-                } else {
-                    *value += leaf.value;
-                }
-            }
-        };
-
-    let iter = node_offsets
-        .iter()
-        .copied()
-        .tuple_windows()
-        .zip(values_iter)
-        .zip(leaf_offsets);
-
-    if num_threads == 1 {
-        iter.for_each(inner_fn);
-    } else {
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(num_threads)
-            .build()
-            .expect("Cannot build rayon ThreadPool")
-            .install(|| {
-                iter.par_bridge().for_each(inner_fn);
-            });
-    }
 }
 
 #[pyfunction]
