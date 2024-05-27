@@ -41,8 +41,11 @@ def test_prior_influence_callable():
     assert np.argmin(scores) == data.shape[0] - 1
 
 
+# Single-thread and parallel implementations are a bit different, so here we check both.
+# We use n_thread parameter instead of n_jobs, which is a fixture in conftest.py
+@pytest.mark.parametrize("n_thread", [1, 2])
 @pytest.mark.regression
-def test_regression_fit_known(regression_data):
+def test_regression_fit_known(n_thread, regression_data):
     random_seed = 0
     n_samples = 1024
     n_features = 16
@@ -53,7 +56,8 @@ def test_regression_fit_known(regression_data):
     known_data = data[rng.choice(n_samples, n_known, replace=False)]
     known_labels = rng.choice([-1, 1], n_known, replace=True)
 
-    forest = AADForest(n_trees=n_trees, random_seed=random_seed)
+    # This small sampletrees_per_batch is inefficient, but it's good for testing to guarantee parallel execution.
+    forest = AADForest(n_trees=n_trees, random_seed=random_seed, n_jobs=n_thread, sampletrees_per_batch=2048)
     forest.fit(data)
     pre_fit_known_scores = forest.score_samples(data)
 

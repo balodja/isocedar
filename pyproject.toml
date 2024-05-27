@@ -24,8 +24,6 @@ classifiers = [
 ]
 dependencies = [
     "click",
-    # We need it for cpu_count() only, but we have it anyway as a dependency of scikit-learn
-    "joblib",
     "numpy",
     # sklearn.tree._splitter.RandomSplitter changed signature in 1.4.0
     "scikit-learn>=1.4,<2",

@@ -22,6 +22,7 @@ class IsolationForestEvaluator(ForestEvaluator):
             node_offsets=node_offsets,
             leaf_offsets=leaf_offsets,
             num_threads=isoforest.n_jobs,
+            sampletrees_per_batch=1 << 20,
         )
 
     @classmethod

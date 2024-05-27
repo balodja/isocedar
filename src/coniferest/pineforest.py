@@ -63,6 +63,7 @@ class PineForest(Coniferest):
         weight_ratio=1.0,
         n_jobs=None,
         random_seed=None,
+        sampletrees_per_batch=1 << 20,
     ):
         super().__init__(
             trees=[],
@@ -70,6 +71,7 @@ class PineForest(Coniferest):
             max_depth=max_depth,
             n_jobs=n_jobs,
             random_seed=random_seed,
+            sampletrees_per_batch=sampletrees_per_batch,
         )
         self.n_trees = n_trees
         self.n_spare_trees = n_spare_trees

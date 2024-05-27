@@ -2,13 +2,14 @@ use crate::mut_slices::MutSlices;
 use crate::selector::Selector;
 use enum_dispatch::enum_dispatch;
 use itertools::Itertools;
+use ndarray::parallel::prelude::*;
 use ndarray::{ArrayView1, ArrayView2, ArrayViewMut1, ArrayViewMut2, Axis, Zip};
 use num_traits::AsPrimitive;
 use numpy::{Element, PyArray1, PyArray2, PyArrayMethods};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::PyAnyMethods;
 use pyo3::{pyfunction, Bound, FromPyObject, PyResult, Python};
-use rayon::iter::{ParallelBridge, ParallelIterator};
+use rayon::prelude::*;
 
 type DeltaSumHitCount<'py> = (Bound<'py, PyArray2<f64>>, Bound<'py, PyArray2<i64>>);
 
@@ -21,6 +22,7 @@ trait DataTrait<'py> {
         node_offsets: Bound<'py, PyArray1<usize>>,
         weights: Option<Bound<'py, PyArray1<f64>>>,
         num_threads: usize,
+        batch_size: usize,
     ) -> PyResult<Bound<'py, PyArray1<f64>>>;
 
     fn calc_paths_sum_transpose(
@@ -31,6 +33,7 @@ trait DataTrait<'py> {
         leaf_offsets: Bound<'py, PyArray1<usize>>,
         weights: Option<Bound<'py, PyArray1<f64>>>,
         num_threads: usize,
+        batch_size: usize,
     ) -> PyResult<Bound<'py, PyArray1<f64>>>;
 
     fn calc_feature_delta_sum(
@@ -39,6 +42,7 @@ trait DataTrait<'py> {
         selectors: Bound<'py, PyArray1<Selector>>,
         node_offsets: Bound<'py, PyArray1<usize>>,
         num_threads: usize,
+        batch_size: usize,
     ) -> PyResult<DeltaSumHitCount<'py>>;
 }
 
@@ -54,6 +58,7 @@ where
         node_offsets: Bound<'py, PyArray1<usize>>,
         weights: Option<Bound<'py, PyArray1<f64>>>,
         num_threads: usize,
+        batch_size: usize,
     ) -> PyResult<Bound<'py, PyArray1<f64>>> {
         let selectors = selectors.readonly();
         let selectors_view = selectors.as_array();
@@ -70,6 +75,8 @@ where
         let weights = weights.map(|weights| weights.readonly());
         let weights_view = weights.as_ref().map(|weights| weights.as_array());
 
+        let num_threads = get_num_threads(data_view.nrows(), num_threads, batch_size)?;
+
         Ok({
             let paths = PyArray1::zeros_bound(py, data_view.nrows(), false);
             // SAFETY: this call invalidates other views, but it is the only view we need
@@ -82,6 +89,7 @@ where
                 data_view,
                 weights_view,
                 num_threads,
+                batch_size,
                 paths_view_mut,
             );
             paths
@@ -96,6 +104,7 @@ where
         leaf_offsets: Bound<'py, PyArray1<usize>>,
         weights: Option<Bound<'py, PyArray1<f64>>>,
         num_threads: usize,
+        batch_size: usize,
     ) -> PyResult<Bound<'py, PyArray1<f64>>> {
         let selectors = selectors.readonly();
         let selectors_view = selectors.as_array();
@@ -115,6 +124,8 @@ where
 
         let weights = weights.map(|weights| weights.readonly());
         let weights_view = weights.as_ref().map(|weights| weights.as_array());
+
+        let num_threads = get_num_threads(data_view.ncols(), num_threads, batch_size)?;
 
         Ok({
             let values = PyArray1::zeros_bound(
@@ -136,6 +147,7 @@ where
                 data_view,
                 weights_view,
                 num_threads,
+                batch_size,
                 values_view,
             );
             values
@@ -148,6 +160,7 @@ where
         selectors: Bound<'py, PyArray1<Selector>>,
         node_offsets: Bound<'py, PyArray1<usize>>,
         num_threads: usize,
+        batch_size: usize,
     ) -> PyResult<DeltaSumHitCount<'py>> {
         let selectors = selectors.readonly();
         let selectors_view = selectors.as_array();
@@ -160,6 +173,8 @@ where
         let data = self.readonly();
         let data_view = data.as_array();
         check_data(data_view)?;
+
+        let num_threads = get_num_threads(data_view.nrows(), num_threads, batch_size)?;
 
         Ok({
             let delta_sum =
@@ -177,6 +192,7 @@ where
                 node_offsets_view,
                 data_view,
                 num_threads,
+                batch_size,
                 delta_sum_view,
                 hit_count_view,
             );
@@ -229,6 +245,11 @@ fn check_selectors(selectors: ArrayView1<Selector>) -> PyResult<()> {
 
 #[inline]
 fn check_node_offsets(node_offsets: ArrayView1<usize>, selectors_length: usize) -> PyResult<()> {
+    if node_offsets.len() <= 1 {
+        return Err(PyValueError::new_err(
+            "node_offsets must have at least two elements",
+        ));
+    }
     if let Some(node_offsets) = node_offsets.as_slice() {
         for (x, y) in node_offsets.iter().copied().tuple_windows() {
             if x > y {
@@ -252,8 +273,10 @@ fn check_node_offsets(node_offsets: ArrayView1<usize>, selectors_length: usize) 
 
 #[inline]
 fn check_leaf_offsets(leaf_offsets: ArrayView1<usize>, node_offset_len: usize) -> PyResult<()> {
-    if leaf_offsets.len() == 0 {
-        return Err(PyValueError::new_err("leaf_offsets must not be empty"));
+    if leaf_offsets.len() <= 1 {
+        return Err(PyValueError::new_err(
+            "leaf_offsets must have at least two elements",
+        ));
     }
     if leaf_offsets.len() != node_offset_len {
         return Err(PyValueError::new_err(
@@ -286,8 +309,18 @@ fn check_data<T>(data: ArrayView2<T>) -> PyResult<()> {
     Ok(())
 }
 
+#[inline]
+fn get_num_threads(nrows: usize, num_threads: usize, batch_size: usize) -> PyResult<usize> {
+    if batch_size == 0 {
+        Err(PyValueError::new_err("batch_size must be greater than 0"))
+    } else {
+        let n_jobs = nrows.div_ceil(batch_size);
+        Ok(usize::min(num_threads, n_jobs))
+    }
+}
+
 #[pyfunction]
-#[pyo3(signature = (selectors, node_offsets, data, weights = None, num_threads = 0))]
+#[pyo3(signature = (selectors, node_offsets, data, weights = None, *, num_threads, batch_size))]
 pub(crate) fn calc_paths_sum<'py>(
     py: Python<'py>,
     selectors: Bound<'py, PyArray1<Selector>>,
@@ -296,8 +329,16 @@ pub(crate) fn calc_paths_sum<'py>(
     data: Data<'py>,
     weights: Option<Bound<'py, PyArray1<f64>>>,
     num_threads: usize,
+    batch_size: usize,
 ) -> PyResult<Bound<'py, PyArray1<f64>>> {
-    data.calc_paths_sum(py, selectors, node_offsets, weights, num_threads)
+    data.calc_paths_sum(
+        py,
+        selectors,
+        node_offsets,
+        weights,
+        num_threads,
+        batch_size,
+    )
 }
 
 fn calc_paths_sum_impl<T>(
@@ -306,6 +347,7 @@ fn calc_paths_sum_impl<T>(
     data: ArrayView2<T>,
     weights: Option<ArrayView1<f64>>,
     num_threads: usize,
+    batch_size: usize,
     paths: ArrayViewMut1<f64>,
 ) where
     T: Copy + Send + Sync + PartialOrd + 'static,
@@ -338,13 +380,15 @@ fn calc_paths_sum_impl<T>(
             .build()
             .expect("Cannot build rayon ThreadPool")
             .install(|| {
-                zip.par_for_each(inner_fn);
+                zip.into_par_iter()
+                    .with_min_len(batch_size)
+                    .for_each(|(path, sample)| inner_fn(path, sample));
             });
     }
 }
 
 #[pyfunction]
-#[pyo3(signature = (selectors, node_offsets, leaf_offsets, data, weights = None, num_threads = 0))]
+#[pyo3(signature = (selectors, node_offsets, leaf_offsets, data, weights = None, *, num_threads, batch_size))]
 pub(crate) fn calc_paths_sum_transpose<'py>(
     py: Python<'py>,
     selectors: Bound<'py, PyArray1<Selector>>,
@@ -353,6 +397,7 @@ pub(crate) fn calc_paths_sum_transpose<'py>(
     data: Data<'py>,
     weights: Option<Bound<'py, PyArray1<f64>>>,
     num_threads: usize,
+    batch_size: usize,
 ) -> PyResult<Bound<'py, PyArray1<f64>>> {
     data.calc_paths_sum_transpose(
         py,
@@ -361,6 +406,7 @@ pub(crate) fn calc_paths_sum_transpose<'py>(
         leaf_offsets,
         weights,
         num_threads,
+        batch_size,
     )
 }
 
@@ -371,6 +417,7 @@ fn calc_paths_sum_transpose_impl<T>(
     data: ArrayView2<T>,
     weights: Option<ArrayView1<f64>>,
     num_threads: usize,
+    batch_size: usize,
     mut values: ArrayViewMut1<f64>,
 ) where
     T: Copy + Send + Sync + PartialOrd + 'static,
@@ -378,10 +425,13 @@ fn calc_paths_sum_transpose_impl<T>(
 {
     let selectors = selectors
         .as_slice()
-        .expect("Cannot get selectors slice from ArrayView");
+        .expect("selectors must be contiguous and in memory order");
+    let node_offsets = node_offsets
+        .as_slice()
+        .expect("node_offsets must be contiguous and in memory order");
     let leaf_offsets = leaf_offsets
         .as_slice()
-        .expect("Cannot get leaf_offsets slice from ArrayView");
+        .expect("leaf_offsets must be contiguous and in memory order");
 
     let values_iter = MutSlices::new(
         values
@@ -391,13 +441,13 @@ fn calc_paths_sum_transpose_impl<T>(
     );
 
     let inner_fn =
-        |(((tree_start, tree_end), values), &leaf_offset): (((usize, usize), &mut [f64]), _)| {
+        |(((tree_start, tree_end), values), &leaf_first): (((usize, usize), &mut [f64]), _)| {
             for (x_index, sample) in data.axis_iter(Axis(0)).enumerate() {
                 let tree_selectors = unsafe { selectors.get_unchecked(tree_start..tree_end) };
 
                 let leaf = find_leaf(tree_selectors, sample.as_slice().unwrap());
 
-                let value = unsafe { values.get_unchecked_mut(leaf.left as usize - leaf_offset) };
+                let value = unsafe { values.get_unchecked_mut(leaf.left as usize - leaf_first) };
                 if let Some(weights) = weights {
                     *value += weights[x_index] * leaf.value;
                 } else {
@@ -406,36 +456,46 @@ fn calc_paths_sum_transpose_impl<T>(
             }
         };
 
-    let iter = node_offsets
-        .iter()
-        .copied()
-        .tuple_windows()
-        .zip(values_iter)
-        .zip(leaf_offsets);
+    let leaf_firsts = &leaf_offsets[..leaf_offsets.len() - 1];
 
     if num_threads == 1 {
-        iter.for_each(inner_fn);
+        // Here we use itertools methods
+        node_offsets
+            .iter()
+            .copied()
+            .tuple_windows()
+            .zip_eq(values_iter)
+            .zip_eq(leaf_firsts)
+            .for_each(inner_fn);
     } else {
         rayon::ThreadPoolBuilder::new()
             .num_threads(num_threads)
             .build()
             .expect("Cannot build rayon ThreadPool")
             .install(|| {
-                iter.par_bridge().for_each(inner_fn);
+                // Here we use rayon methods
+                node_offsets
+                    .par_windows(2)
+                    .map(|window| (window[0], window[1]))
+                    .zip_eq(values_iter)
+                    .zip_eq(leaf_firsts)
+                    .with_min_len(batch_size)
+                    .for_each(inner_fn);
             });
     }
 }
 
 #[pyfunction]
-#[pyo3(signature = (selectors, node_offsets, data, num_threads = 0))]
+#[pyo3(signature = (selectors, node_offsets, data, *, num_threads, batch_size))]
 pub(crate) fn calc_feature_delta_sum<'py>(
     py: Python<'py>,
     selectors: Bound<'py, PyArray1<Selector>>,
     node_offsets: Bound<'py, PyArray1<usize>>,
     data: Data<'py>,
     num_threads: usize,
+    batch_size: usize,
 ) -> PyResult<DeltaSumHitCount<'py>> {
-    data.calc_feature_delta_sum(py, selectors, node_offsets, num_threads)
+    data.calc_feature_delta_sum(py, selectors, node_offsets, num_threads, batch_size)
 }
 
 fn calc_feature_delta_sum_impl<T>(
@@ -443,6 +503,7 @@ fn calc_feature_delta_sum_impl<T>(
     node_offsets: ArrayView1<usize>,
     data: ArrayView2<T>,
     num_threads: usize,
+    batch_size: usize,
     mut delta_sum: ArrayViewMut2<f64>,
     mut hit_count: ArrayViewMut2<i64>,
 ) where
@@ -498,7 +559,11 @@ fn calc_feature_delta_sum_impl<T>(
             .build()
             .expect("Cannot build rayon ThreadPool")
             .install(|| {
-                zip.par_for_each(inner_fn);
+                zip.into_par_iter().with_min_len(batch_size).for_each(
+                    |(sample, delta_sum_row, hit_count_row)| {
+                        inner_fn(sample, delta_sum_row, hit_count_row)
+                    },
+                );
             });
     }
 }
