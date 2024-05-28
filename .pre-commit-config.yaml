@@ -22,3 +22,11 @@ repos:
       - id: ruff
         args: [ --fix ]
       - id: ruff-format
+  - repo: local
+    hooks:
+      - id: cargo-fmt
+        name: cargo fmt
+        language: rust
+        entry: cargo fmt --manifest-path=rust/Cargo.toml
+        files: \.rs
+        pass_filenames: false
