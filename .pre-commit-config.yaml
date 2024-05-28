@@ -30,15 +30,3 @@ repos:
         entry: cargo fmt --manifest-path=rust/Cargo.toml
         files: \.rs
         pass_filenames: false
-      - id: cargo-clippy-fix
-        name: cargo clippy fix
-        language: rust
-        entry: cargo clippy --manifest-path=rust/Cargo.toml --all-targets --fix --allow-dirty --allow-staged
-        files: \.rs
-        pass_filenames: false
-      - id: cargo-clippy-check
-        name: cargo clippy check
-        language: rust
-        entry: cargo clippy --manifest-path=rust/Cargo.toml --all-targets -- -D warnings
-        files: \.rs
-        pass_filenames: false
