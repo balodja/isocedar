@@ -25,6 +25,7 @@ trait DataTrait<'py> {
         batch_size: usize,
     ) -> PyResult<Bound<'py, PyArray1<f64>>>;
 
+    #[allow(clippy::too_many_arguments)]
     fn calc_paths_sum_transpose(
         &self,
         py: Python<'py>,
@@ -387,6 +388,7 @@ fn calc_paths_sum_impl<T>(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 #[pyfunction]
 #[pyo3(signature = (selectors, node_offsets, leaf_offsets, data, weights = None, *, num_threads, batch_size))]
 pub(crate) fn calc_paths_sum_transpose<'py>(
@@ -410,6 +412,7 @@ pub(crate) fn calc_paths_sum_transpose<'py>(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn calc_paths_sum_transpose_impl<T>(
     selectors: ArrayView1<Selector>,
     node_offsets: ArrayView1<usize>,
