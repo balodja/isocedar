@@ -13,11 +13,12 @@ from .utils import average_path_length
 
 __all__ = ["Coniferest", "ConiferestEvaluator"]
 
-
 # Instead of doing:
 # from sklearn.utils._random import RAND_R_MAX
 # we have:
 RAND_R_MAX = 0x7FFFFFFF
+
+
 # Cause RAND_R_MAX is restricted to C-code.
 
 
@@ -44,12 +45,15 @@ class Coniferest(ABC):
         Seed for the reproducibility. If None, then random seed is used.
     """
 
-    def __init__(self, trees=None, n_subsamples=256, max_depth=None, n_jobs=-1, random_seed=None):
+    def __init__(
+        self, trees=None, n_subsamples=256, max_depth=None, n_jobs=-1, random_seed=None, sampletrees_per_batch=1 << 20
+    ):
         self.trees = trees or []
         self.n_subsamples = n_subsamples
         self.max_depth = max_depth or int(np.log2(n_subsamples))
 
         self.n_jobs = n_jobs
+        self.sampletrees_per_batch = sampletrees_per_batch
 
         # For the better future with reproducible parallel tree building.
         # self.seedseq = np.random.SeedSequence(random_state)
@@ -217,14 +221,15 @@ class ConiferestEvaluator(ForestEvaluator):
 
     def __init__(self, coniferest, map_value=None):
         selectors_list = [self.extract_selectors(t, map_value) for t in coniferest.trees]
-        selectors, indices, leaf_count = self.combine_selectors(selectors_list)
+        selectors, node_offsets, leaf_offsets = self.combine_selectors(selectors_list)
 
         super().__init__(
             samples=coniferest.n_subsamples,
             selectors=selectors,
-            indices=indices,
-            leaf_count=leaf_count,
+            node_offsets=node_offsets,
+            leaf_offsets=leaf_offsets,
             num_threads=coniferest.n_jobs,
+            sampletrees_per_batch=coniferest.sampletrees_per_batch,
         )
 
     @classmethod

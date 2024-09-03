@@ -131,13 +131,10 @@ class LimeEvaluator(ForestEvaluator):
         if self.trees < 1:
             raise ValueError("a forest without trees?")
 
-        selectors, indices, leaf_count = self.combine_selectors([self.extract_selectors(pine) for pine in pines])
+        selectors, node_offsets, leaf_offsets = self.combine_selectors([self.extract_selectors(pine) for pine in pines])
 
         super(LimeEvaluator, self).__init__(
-            samples=pine_forest.subsamples,
-            selectors=selectors,
-            indices=indices,
-            leaf_count=leaf_count,
+            samples=pine_forest.subsamples, selectors=selectors, node_offsets=node_offsets, leaf_offsets=leaf_offsets
         )
 
     @classmethod

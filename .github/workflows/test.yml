@@ -1,6 +1,6 @@
 name: Test
 
-on: [push, pull_request]
+on: [ push, pull_request ]
 
 
 jobs:
@@ -14,29 +14,60 @@ jobs:
         python-version: [ '3.9', '3.10', '3.11', '3.12' ]
 
     steps:
-    - uses: actions/checkout@v4
-    - name: Setup Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v5
-      with:
-        python-version: ${{ matrix.python-version }}
-    - name: Run tox
-      run: pipx run tox -e py${{ matrix.python-version }}
+      - uses: actions/checkout@v4
+      - name: Setup Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Run tox
+        run: pipx run tox -e py${{ matrix.python-version }}
+
+  rust-test:
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: rust
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+      - name: Run cargo test
+        run: cargo test --all
+
+  rust-clippy:
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: rust
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+      - name: Run cargo clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
 
   benchmark:
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v4
-    - name: Setup Python 3.12
-      uses: actions/setup-python@v5
-      with:
-        python-version: 3.12
-    - name: Run benchmarks
-      uses: CodSpeedHQ/action@v3
-      with:
-        token: ${{ secrets.CODSPEED_TOKEN }}
-        run: |
-          pip install -e '.[dev,datasets]'
-          # https://github.com/CodSpeedHQ/pytest-codspeed/issues/27
-          pip install 'pytest!=8.1.1' pytest-codspeed
-          python3 -mpytest --codspeed
+      - uses: actions/checkout@v4
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: 3.12
+      - name: Run benchmarks
+        uses: CodSpeedHQ/action@v3
+        with:
+          token: ${{ secrets.CODSPEED_TOKEN }}
+          run: |
+            pip install -e '.[dev,datasets]'
+            # https://github.com/CodSpeedHQ/pytest-codspeed/issues/27
+            pip install 'pytest!=8.1.1' pytest-codspeed
+            python3 -mpytest --codspeed
