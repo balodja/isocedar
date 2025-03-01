@@ -39,7 +39,7 @@ jobs:
           echo "CC=$(brew --prefix llvm)/bin/clang" >> $GITHUB_ENV
           echo "CONIFEREST_FORCE_OPENMP_ON_MACOS=1" >> $GITHUB_ENV
       - name: Build wheels
-        uses: pypa/cibuildwheel@v2.22.0
+        uses: pypa/cibuildwheel@v2.23.0
         env:
           CIBW_ARCHS: ${{ matrix.archs }}
           # We skip MUSL (no numpy binary wheels) and PyPy
