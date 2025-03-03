@@ -70,9 +70,7 @@ def convert(
         name = str(uuid4().hex)
 
     if initial_types is None:
-        raise ValueError(
-            "Initial types are required. See usage of " "convert(...) in coniferest.onnx.convert for details"
-        )
+        raise ValueError("Initial types are required. See usage of convert(...) in coniferest.onnx.convert for details")
 
     target_opset = target_opset if target_opset else get_maximum_opset_supported()
 
